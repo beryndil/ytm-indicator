@@ -21,18 +21,44 @@ WATCHER_NAME = "org.kde.StatusNotifierWatcher"
 WATCHER_PATH = "/StatusNotifierWatcher"
 WATCHER_IFACE = "org.kde.StatusNotifierWatcher"
 
-# 22x22 fallback PNG embedded — gray circle, shown when no art yet.
-# Generated once at module import; cheap.
-_FALLBACK_SIZE = 22
+# Fallback icon: YouTube Music mark — red circle, white play triangle.
+# Shown when Pear is offline or between tracks. Rendered once at module
+# import; album art replaces it as soon as a song is loaded.
+_FALLBACK_SIZE = 64
+# YouTube Music red (matches the brand, not clipped from any asset).
+_YTM_RED = (255, 0, 0, 255)
+_WHITE = (255, 255, 255, 255)
 
 
 def _fallback_pixmap() -> tuple[int, int, bytes]:
-    """Build a small gray placeholder ARGB32 pixmap."""
+    """Build the YouTube Music mark as an ARGB32 pixmap."""
     from PIL import Image, ImageDraw
 
-    img = Image.new("RGBA", (_FALLBACK_SIZE, _FALLBACK_SIZE), (0, 0, 0, 0))
+    # Render at 4x and downsample — PIL's primitives aren't anti-aliased,
+    # so super-sampling is the cleanest way to get a smooth circle + edge
+    # on the triangle.
+    scale = 4
+    size = _FALLBACK_SIZE * scale
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.ellipse((1, 1, _FALLBACK_SIZE - 2, _FALLBACK_SIZE - 2), fill=(90, 90, 90, 255))
+
+    # Red circle fills the canvas.
+    draw.ellipse((0, 0, size - 1, size - 1), fill=_YTM_RED)
+
+    # White play triangle, visually centered. A triangle's geometric centroid
+    # sits 1/3 of the way from the base to the opposite vertex, so we offset
+    # the left edge by width/3 to put the centroid at the circle's center.
+    cx, cy = size / 2, size / 2
+    half_height = size * 0.20  # triangle is ~40 % of the diameter tall
+    width = size * 0.34
+    left = cx - width / 3
+    right = left + width
+    draw.polygon(
+        [(left, cy - half_height), (left, cy + half_height), (right, cy)],
+        fill=_WHITE,
+    )
+
+    img = img.resize((_FALLBACK_SIZE, _FALLBACK_SIZE), Image.Resampling.LANCZOS)
     return _FALLBACK_SIZE, _FALLBACK_SIZE, _rgba_to_argb(img.tobytes())
 
 
@@ -231,12 +257,17 @@ async def watch_and_reregister(bus: MessageBus, bus_name: str) -> None:
     dbus_iface = dbus_proxy.get_interface("org.freedesktop.DBus")
 
     loop = asyncio.get_running_loop()
+    # Holding strong refs so the GC doesn't cancel in-flight re-registers
+    # (ruff RUF006) and doesn't drop the signal callback itself.
+    bg_tasks: set[asyncio.Task[None]] = set()
 
     def on_name_owner_changed(name: str, old_owner: str, new_owner: str) -> None:
         if name != WATCHER_NAME or not new_owner:
             return
         log.info("watcher owner changed (%s → %s); re-registering", old_owner, new_owner)
-        loop.create_task(_safe_register(bus, bus_name))
+        task = loop.create_task(_safe_register(bus, bus_name))
+        bg_tasks.add(task)
+        task.add_done_callback(bg_tasks.discard)
 
     dbus_iface.on_name_owner_changed(on_name_owner_changed)
 
