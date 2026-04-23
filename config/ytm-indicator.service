@@ -1,0 +1,18 @@
+[Unit]
+Description=YouTube Music tray indicator (controls Pear Desktop)
+# Only run inside a graphical session — the tray host lives on the session bus.
+PartOf=graphical-session.target
+After=graphical-session.target dbus.socket
+Requires=dbus.socket
+
+[Service]
+Type=simple
+ExecStart=%h/Projects/ytm-indicator/.venv/bin/ytm-indicator
+Restart=on-failure
+RestartSec=5
+# Long-lived; polling loop + a few D-Bus objects.
+MemoryHigh=150M
+MemoryMax=300M
+
+[Install]
+WantedBy=graphical-session.target
