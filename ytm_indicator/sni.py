@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -210,3 +211,38 @@ async def register_with_watcher(bus: MessageBus, bus_name: str) -> None:
     iface = proxy.get_interface(WATCHER_IFACE)
     await iface.call_register_status_notifier_item(bus_name)
     log.info("registered with %s as %s", WATCHER_NAME, bus_name)
+
+
+async def watch_and_reregister(bus: MessageBus, bus_name: str) -> None:
+    """Re-register with the watcher whenever its owner changes.
+
+    The watcher's state (the list of registered items) lives in the
+    watcher process's memory. When Patina — or any host — restarts,
+    that list is gone and our old registration goes with it. Subscribe
+    to NameOwnerChanged so we can re-register the moment a new owner
+    appears.
+    """
+    introspect = await bus.introspect("org.freedesktop.DBus", "/org/freedesktop/DBus")
+    dbus_proxy = bus.get_proxy_object(
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        introspect,
+    )
+    dbus_iface = dbus_proxy.get_interface("org.freedesktop.DBus")
+
+    loop = asyncio.get_running_loop()
+
+    def on_name_owner_changed(name: str, old_owner: str, new_owner: str) -> None:
+        if name != WATCHER_NAME or not new_owner:
+            return
+        log.info("watcher owner changed (%s → %s); re-registering", old_owner, new_owner)
+        loop.create_task(_safe_register(bus, bus_name))
+
+    dbus_iface.on_name_owner_changed(on_name_owner_changed)
+
+
+async def _safe_register(bus: MessageBus, bus_name: str) -> None:
+    try:
+        await register_with_watcher(bus, bus_name)
+    except Exception as e:
+        log.warning("re-registration failed: %s", e)

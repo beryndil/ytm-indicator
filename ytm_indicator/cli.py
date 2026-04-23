@@ -20,7 +20,13 @@ from ytm_indicator.pear_api import (
     PearOfflineError,
     PearPairingRejectedError,
 )
-from ytm_indicator.sni import MENU_PATH, SNI_PATH, SNIInterface, register_with_watcher
+from ytm_indicator.sni import (
+    MENU_PATH,
+    SNI_PATH,
+    SNIInterface,
+    register_with_watcher,
+    watch_and_reregister,
+)
 from ytm_indicator.state import SongState, State
 
 log = logging.getLogger("ytm_indicator")
@@ -79,10 +85,15 @@ class Indicator:
         await self.bus.request_name(self._bus_name)
         log.info("bus name acquired: %s", self._bus_name)
 
+        # Subscribe to NameOwnerChanged BEFORE the first register attempt so
+        # we catch the case where the watcher comes online between the two
+        # calls. If registration fails now (no watcher yet), the subscription
+        # will fire as soon as one shows up.
+        await watch_and_reregister(self.bus, self._bus_name)
         try:
             await register_with_watcher(self.bus, self._bus_name)
         except Exception as e:
-            log.warning("watcher registration failed: %s (host may pick us up later)", e)
+            log.warning("initial watcher registration failed: %s (will retry on owner change)", e)
 
     def _safe_call(self, coro_fn):  # type: ignore[no-untyped-def]
         async def wrapped() -> None:
