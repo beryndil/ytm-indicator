@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 from dbus_fast.aio import MessageBus
@@ -76,9 +77,10 @@ def _rgba_to_argb(rgba: bytes) -> bytes:
 class SNIInterface(ServiceInterface):
     """Implements org.kde.StatusNotifierItem."""
 
-    def __init__(self, state: State) -> None:
+    def __init__(self, state: State, on_activate: Callable[[], None]) -> None:
         super().__init__(SNI_IFACE)
         self._state = state
+        self._on_activate = on_activate
         self._pixmap: tuple[int, int, bytes] = _fallback_pixmap()
 
     # --- public mutators ----------------------------------------------------
@@ -120,8 +122,11 @@ class SNIInterface(ServiceInterface):
 
     @method()
     def Activate(self, x: "i", y: "i"):
-        # Left-click = no-op for v0.1; transport via right-click menu.
-        pass
+        # Left-click: open (or focus) the Pear Desktop window.
+        try:
+            self._on_activate()
+        except Exception as e:
+            log.warning("activate handler failed: %s", e)
 
     @method()
     def SecondaryActivate(self, x: "i", y: "i"):

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import signal as sig
+import subprocess
 import sys
 
 import aiohttp
@@ -33,6 +34,31 @@ log = logging.getLogger("ytm_indicator")
 
 POLL_INTERVAL_S = 3.0
 OFFLINE_BACKOFF_S = 10.0
+PEAR_LAUNCH_CMD = ["pear-desktop"]
+
+
+def _open_pear() -> None:
+    """Launch Pear Desktop, or focus the existing window if it's already up.
+
+    Electron's built-in single-instance lock routes a second invocation to
+    the already-running process (which focuses its window) so running the
+    same command covers both cases. stdin/stdout/stderr are detached and
+    the child runs in a new session so it outlives this indicator.
+    """
+    try:
+        subprocess.Popen(
+            PEAR_LAUNCH_CMD,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        log.info("activate: spawned %s", PEAR_LAUNCH_CMD[0])
+    except FileNotFoundError:
+        log.error("activate: %s not on PATH", PEAR_LAUNCH_CMD[0])
+    except OSError as e:
+        log.warning("activate: failed to spawn %s: %s", PEAR_LAUNCH_CMD[0], e)
 
 
 def _parse_song(payload: dict[str, object], like: str) -> SongState:
@@ -77,7 +103,7 @@ class Indicator:
             dislike=self._safe_call(self.pear.dislike),
         )
 
-        self.sni = SNIInterface(self.state)
+        self.sni = SNIInterface(self.state, on_activate=_open_pear)
         self.menu = DBusMenuInterface(self.state, actions)
         self.bus.export(SNI_PATH, self.sni)
         self.bus.export(MENU_PATH, self.menu)
