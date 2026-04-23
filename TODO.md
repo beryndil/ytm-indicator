@@ -1,18 +1,35 @@
 # ytm-indicator — Outstanding Items
 
-## v0.1.0 — initial build (2026-04-23, in progress)
+## v0.1.0 — shipped 2026-04-23
 
 ### Shipping
 
 - [x] Project scaffold (pyproject, LICENSE, CLAUDE.md, TODO.md, README).
-- [ ] Pear API client with JWT pairing + token persistence (`pear_api.py`).
-- [ ] StatusNotifierItem D-Bus service (`sni.py`).
-- [ ] DBusMenu D-Bus service (`menu.py`).
-- [ ] Album art fetch → PNG cache (`art.py`).
-- [ ] Main loop wiring poll → state → SNI updates (`cli.py`).
-- [ ] systemd `--user` unit (`config/ytm-indicator.service`).
-- [ ] First smoke test: icon appears in Patina tray, play/pause works.
-- [ ] git init, first commit, push to `Beryndil/ytm-indicator` org repo.
+- [x] Pear API client with JWT pairing + token persistence (`pear_api.py`).
+- [x] StatusNotifierItem D-Bus service (`sni.py`).
+- [x] DBusMenu D-Bus service (`menu.py`).
+- [x] Album art fetch → PNG cache (`art.py`).
+- [x] Main loop wiring poll → state → SNI updates (`cli.py`).
+- [x] systemd `--user` unit (`config/ytm-indicator.service`).
+- [x] First smoke test: watcher registers us, Patina picks up the item,
+      menu GetLayout returns the full tree, status toggles Active↔Passive
+      as Pear comes/goes. Visual confirmation that the icon renders in
+      Patina's header slot still pending — first time Dave looks at the
+      tray he either sees it or files an issue.
+- [x] git init, first commit, push to `Beryndil/ytm-indicator` org repo,
+      tag `v0.1.0`.
+
+### Post-ship follow-ups (still v0.1.x)
+
+- End-to-end test with a song actually playing in Pear — validates title
+  updates, album art fetch, like/dislike toggles. Dave hasn't signed into
+  YouTube Music inside Pear yet, so this is blocked on that.
+- `ytm_indicator/sni.py` + `ytm_indicator/menu.py` use `@method()` without
+  `-> None` return annotations as a workaround for dbus-fast's
+  parse_annotation bug (it turns the string "None" back into Python None
+  under `from __future__ import annotations`, then crashes
+  get_signature_tree). If dbus-fast fixes this upstream, re-add the
+  annotations and drop the comments.
 
 ### Deferred to v0.2.0
 
