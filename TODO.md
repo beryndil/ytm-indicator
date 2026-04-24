@@ -21,6 +21,20 @@
 
 ### Post-ship follow-ups (still v0.1.x)
 
+- **2026-04-23 fix** — `cli.Indicator._push_updates` no longer fires
+  `NewTitle`/`NewToolTip`/`NewStatus` unconditionally. It now takes
+  `prev` and emits `song_changed()` only when one of
+  `(online, video_id, title, artist, album)` differs from the previous
+  snapshot, and `status_changed()` only when `online` transitions.
+  Reason: every SNI signal makes every host (e.g. Patina) call
+  `Properties.GetAll` on the full interface, which PyGObject hosts
+  unpack in pure-Python GVariant code — the 16 KB `IconPixmap` unpack
+  alone is ~250 ms per round-trip. Before the fix, the 3 s poll plus
+  the unconditional offline-backoff push burned ~60–77% of a core on
+  Patina's main thread. `elapsed_s`/`duration_s` tick every poll and
+  never alter a tray-visible field, so they no longer trigger signals.
+  Verified with 60 SIGPROF samples on Patina post-fix: main thread
+  idle in `Gio.py:138 run` on every sample.
 - End-to-end test with a song actually playing in Pear — validates title
   updates, album art fetch, like/dislike toggles. Dave hasn't signed into
   YouTube Music inside Pear yet, so this is blocked on that.

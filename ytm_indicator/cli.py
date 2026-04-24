@@ -140,13 +140,14 @@ class Indicator:
     async def _poll_once(self) -> float:
         """One poll cycle. Returns the interval to wait before the next poll."""
         assert self.pear and self.sni and self.menu and self.art_session
+        prev = self.state.current
         try:
             try:
                 await self.pear.ensure_paired()
             except PearPairingRejectedError:
                 log.error("Pear rejected pairing; cannot continue")
                 self.state.patch(online=False)
-                self._push_updates()
+                self._push_updates(prev)
                 return OFFLINE_BACKOFF_S
             payload = await self.pear.get_song()
             like = await self.pear.get_like_state()
@@ -154,19 +155,18 @@ class Indicator:
             if self.state.current.online:
                 log.info("Pear offline: %s", e)
             self.state.update(SongState(online=False))
-            self._push_updates()
+            self._push_updates(prev)
             return OFFLINE_BACKOFF_S
         except PearError as e:
             log.warning("Pear error: %s", e)
             return OFFLINE_BACKOFF_S
 
         new = _parse_song(payload if isinstance(payload, dict) else {}, like)
-        prev = self.state.current
         changed = self.state.update(new)
         if not changed:
             return POLL_INTERVAL_S
 
-        self._push_updates()
+        self._push_updates(prev)
         if new.has_song and new.video_id != prev.video_id:
             await self._refresh_art(new)
         elif not new.has_song:
@@ -185,10 +185,21 @@ class Indicator:
             log.warning("failed to load art %s: %s", path, e)
             self.sni.reset_icon()
 
-    def _push_updates(self) -> None:
+    # Tray-visible SongState fields — only changes to these warrant an SNI
+    # signal. elapsed_s/duration_s/is_paused/like are NOT here: they tick
+    # (or change silently) without altering Title/IconPixmap/ToolTip/Status,
+    # and each emitted signal makes every SNI host GetAll the full property
+    # set — including a 16 KB IconPixmap — which PyGObject hosts like Patina
+    # unpack in pure-Python GVariant code at ~90% of a core.
+    _TRAY_TITLE_FIELDS = ("online", "video_id", "title", "artist", "album")
+
+    def _push_updates(self, prev: SongState) -> None:
         assert self.sni and self.menu
-        self.sni.song_changed()
-        self.sni.status_changed()
+        cur = self.state.current
+        if any(getattr(prev, f) != getattr(cur, f) for f in self._TRAY_TITLE_FIELDS):
+            self.sni.song_changed()
+        if prev.online != cur.online:
+            self.sni.status_changed()
         self.menu.bump()
 
     async def aclose(self) -> None:
