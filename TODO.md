@@ -44,6 +44,14 @@
   under `from __future__ import annotations`, then crashes
   get_signature_tree). If dbus-fast fixes this upstream, re-add the
   annotations and drop the comments.
+- **2026-04-23 patch** — `scripts/patch-pear-notray.sh` +
+  `config/pear-notray.hook` patch Pear's `app.asar` so `setUpTray()`
+  early-returns, letting `options.tray=true` drive close-to-tray without
+  Pear also creating its own tray icon. Needed because th-ch/youtube-music
+  gates both behaviours behind one config flag. Pacman hook re-applies on
+  every `pear-desktop` upgrade; pristine asar kept at
+  `/usr/lib/pear-desktop/app.asar.pristine.<version>`. If upstream adds a
+  separate `options.hideOnClose` flag, drop the patch.
 
 ### Deferred to v0.2.0
 

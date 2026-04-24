@@ -1,0 +1,12 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = pear-desktop
+
+[Action]
+Description = Re-apply ytm-indicator no-tray patch to pear-desktop
+When = PostTransaction
+Exec = /usr/local/bin/patch-pear-notray
+Depends = nodejs
+Depends = npm
