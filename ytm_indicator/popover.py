@@ -338,7 +338,7 @@ class Popover(Gtk.Window):
         self._like_id = self.like_btn.connect("toggled", self._on_like)
         self.dislike_btn = Gtk.ToggleButton(label="♡  Dislike")
         self._dislike_id = self.dislike_btn.connect("toggled", self._on_dislike)
-        self.open_btn = Gtk.Button(label="Open Pear")
+        self.open_btn = Gtk.Button(label="Open YouTube Music")
         self.open_btn.connect("clicked", lambda *_: self._open_pear())
         secondary.append(self.like_btn)
         secondary.append(self.dislike_btn)
