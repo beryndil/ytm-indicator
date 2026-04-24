@@ -17,7 +17,10 @@ log = logging.getLogger(__name__)
 
 SNI_IFACE = "org.kde.StatusNotifierItem"
 SNI_PATH = "/StatusNotifierItem"
-MENU_PATH = "/MenuBar"
+MENU_PATH = "/MenuBar"  # kept for backwards-compat export; we return NO_MENU_PATH on the bus
+# "/" is the spec sentinel for "no menu" — GTK/Qt SNI hosts then call
+# ContextMenu() on right-click, which we override to launch our popover.
+NO_MENU_PATH = "/"
 WATCHER_NAME = "org.kde.StatusNotifierWatcher"
 WATCHER_PATH = "/StatusNotifierWatcher"
 WATCHER_IFACE = "org.kde.StatusNotifierWatcher"
@@ -77,10 +80,16 @@ def _rgba_to_argb(rgba: bytes) -> bytes:
 class SNIInterface(ServiceInterface):
     """Implements org.kde.StatusNotifierItem."""
 
-    def __init__(self, state: State, on_activate: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        state: State,
+        on_activate: Callable[[], None],
+        on_context_menu: Callable[[int, int], None] | None = None,
+    ) -> None:
         super().__init__(SNI_IFACE)
         self._state = state
         self._on_activate = on_activate
+        self._on_context_menu = on_context_menu
         self._pixmap: tuple[int, int, bytes] = _fallback_pixmap()
 
     # --- public mutators ----------------------------------------------------
@@ -118,7 +127,14 @@ class SNIInterface(ServiceInterface):
 
     @method()
     def ContextMenu(self, x: "i", y: "i"):
-        pass
+        # Hosts (Patina, Plasma, etc.) call this on right-click when the
+        # Menu property is "/" (no DBusMenu). Hand off to the indicator to
+        # spawn our custom popover — x/y are mostly advisory on Wayland.
+        if self._on_context_menu is not None:
+            try:
+                self._on_context_menu(int(x), int(y))
+            except Exception as e:
+                log.warning("context-menu handler failed: %s", e)
 
     @method()
     def Activate(self, x: "i", y: "i"):
@@ -206,7 +222,8 @@ class SNIInterface(ServiceInterface):
 
     @dbus_property(access=PropertyAccess.READ)
     def Menu(self) -> "o":
-        return MENU_PATH
+        # Return "/" so hosts route right-click through ContextMenu() to us.
+        return NO_MENU_PATH
 
     # --- SNI signals --------------------------------------------------------
 

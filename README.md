@@ -3,9 +3,12 @@
 Standalone StatusNotifierItem (SNI) tray control for **Pear Desktop**
 (formerly `th-ch/youtube-music`).
 
-Pops an album-art icon into any SNI host (Patina, waybar, KDE, etc.) and
-exposes play/pause/next/prev/like/dislike through a DBusMenu. No GUI
-framework — pure async Python, `dbus-fast` + `aiohttp`.
+Pops an album-art icon into any SNI host (Patina, waybar, KDE, etc.);
+left-click opens (or focuses) Pear; right-click opens a GTK4/libadwaita
+now-playing popover with album art, a scrub bar, transport controls,
+and like/dislike. Indicator is pure async Python (`dbus-fast` +
+`aiohttp`); popover is a separate GTK4 process anchored via
+`gtk4-layer-shell`.
 
 ## Why standalone
 
@@ -19,6 +22,10 @@ the icon surfaces there automatically once the daemon registers.
 - [`pear-desktop`](https://github.com/pear-devs/pear-desktop) running with the
   **API Server** plugin enabled on `127.0.0.1:26538`
 - Any SNI host (Patina's tray slot, waybar `tray` module, etc.)
+- **For the right-click popover:** GTK 4, libadwaita 1, `gtk4-layer-shell`,
+  and PyGObject. On Arch: `pacman -S gtk4 libadwaita gtk4-layer-shell python-gobject`.
+  The venv must be created with `uv venv --system-site-packages` so the
+  popover process can import `gi`.
 
 ## Install
 

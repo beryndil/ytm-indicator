@@ -1,4 +1,4 @@
-"""Entry point — wires state, Pear client, SNI service, DBusMenu, poller."""
+"""Entry point — wires state, Pear client, SNI service, popover, poller."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from dbus_fast import BusType
 from dbus_fast.aio import MessageBus
 
 from ytm_indicator.art import fetch_art
-from ytm_indicator.menu import Actions, DBusMenuInterface
 from ytm_indicator.pear_api import (
     PearClient,
     PearError,
@@ -22,7 +21,6 @@ from ytm_indicator.pear_api import (
     PearPairingRejectedError,
 )
 from ytm_indicator.sni import (
-    MENU_PATH,
     SNI_PATH,
     SNIInterface,
     register_with_watcher,
@@ -35,6 +33,12 @@ log = logging.getLogger("ytm_indicator")
 POLL_INTERVAL_S = 3.0
 OFFLINE_BACKOFF_S = 10.0
 PEAR_LAUNCH_CMD = ["pear-desktop"]
+# Popover is a separate GTK4 process — keeps GTK's main loop out of our
+# asyncio loop, and a rendering bug there can't take the tray icon down.
+POPOVER_CMD = [sys.executable, "-m", "ytm_indicator.popover"]
+# gtk4-layer-shell has to interpose before libwayland-client, so it must be
+# LD_PRELOADed. Hand the child the preload directly so there's no re-exec.
+LAYER_SHELL_LIB = "/usr/lib/libgtk4-layer-shell.so"
 
 
 def _open_pear() -> None:
@@ -59,6 +63,44 @@ def _open_pear() -> None:
         log.error("activate: %s not on PATH", PEAR_LAUNCH_CMD[0])
     except OSError as e:
         log.warning("activate: failed to spawn %s: %s", PEAR_LAUNCH_CMD[0], e)
+
+
+def _spawn_popover(song: SongState) -> None:
+    """Launch the GTK4 now-playing popover as a detached subprocess.
+
+    Current song state is passed on the command line so the popover can
+    render immediately without a round-trip to Pear's API.
+    """
+    argv = [
+        *POPOVER_CMD,
+        "--title", song.title,
+        "--artist", song.artist,
+        "--album", song.album or "",
+        "--video-id", song.video_id,
+        "--paused", "true" if song.is_paused else "false",
+        "--elapsed", f"{song.elapsed_s:.0f}",
+        "--duration", f"{song.duration_s:.0f}",
+        "--like", song.like,
+    ]
+    env = os.environ.copy()
+    existing = env.get("LD_PRELOAD", "")
+    env["LD_PRELOAD"] = (
+        f"{LAYER_SHELL_LIB}:{existing}" if existing else LAYER_SHELL_LIB
+    )
+    env["_YTM_LAYER_SHELL_PRELOADED"] = "1"
+    try:
+        subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+            env=env,
+        )
+        log.info("context-menu: spawned popover")
+    except OSError as e:
+        log.warning("context-menu: popover spawn failed: %s", e)
 
 
 def _parse_song(payload: dict[str, object], like: str) -> SongState:
@@ -87,7 +129,6 @@ class Indicator:
         self.pear: PearClient | None = None
         self.art_session: aiohttp.ClientSession | None = None
         self.sni: SNIInterface | None = None
-        self.menu: DBusMenuInterface | None = None
         self._bus_name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
 
     async def start(self) -> None:
@@ -95,18 +136,12 @@ class Indicator:
         self.art_session = aiohttp.ClientSession()
         self.bus = await MessageBus(bus_type=BusType.SESSION).connect()
 
-        actions = Actions(
-            toggle_play=self._safe_call(self.pear.toggle_play),
-            next_track=self._safe_call(self.pear.next_track),
-            previous_track=self._safe_call(self.pear.previous_track),
-            like=self._safe_call(self.pear.like),
-            dislike=self._safe_call(self.pear.dislike),
+        self.sni = SNIInterface(
+            self.state,
+            on_activate=_open_pear,
+            on_context_menu=lambda _x, _y: _spawn_popover(self.state.current),
         )
-
-        self.sni = SNIInterface(self.state, on_activate=_open_pear)
-        self.menu = DBusMenuInterface(self.state, actions)
         self.bus.export(SNI_PATH, self.sni)
-        self.bus.export(MENU_PATH, self.menu)
 
         await self.bus.request_name(self._bus_name)
         log.info("bus name acquired: %s", self._bus_name)
@@ -121,17 +156,6 @@ class Indicator:
         except Exception as e:
             log.warning("initial watcher registration failed: %s (will retry on owner change)", e)
 
-    def _safe_call(self, coro_fn):  # type: ignore[no-untyped-def]
-        async def wrapped() -> None:
-            try:
-                await coro_fn()
-                # Refresh state quickly after an action.
-                await self._poll_once()
-            except PearError as e:
-                log.warning("action failed: %s", e)
-
-        return wrapped
-
     async def run(self) -> None:
         while True:
             interval = await self._poll_once()
@@ -139,7 +163,7 @@ class Indicator:
 
     async def _poll_once(self) -> float:
         """One poll cycle. Returns the interval to wait before the next poll."""
-        assert self.pear and self.sni and self.menu and self.art_session
+        assert self.pear and self.sni and self.art_session
         prev = self.state.current
         try:
             try:
@@ -194,13 +218,12 @@ class Indicator:
     _TRAY_TITLE_FIELDS = ("online", "video_id", "title", "artist", "album")
 
     def _push_updates(self, prev: SongState) -> None:
-        assert self.sni and self.menu
+        assert self.sni
         cur = self.state.current
         if any(getattr(prev, f) != getattr(cur, f) for f in self._TRAY_TITLE_FIELDS):
             self.sni.song_changed()
         if prev.online != cur.online:
             self.sni.status_changed()
-        self.menu.bump()
 
     async def aclose(self) -> None:
         if self.pear:

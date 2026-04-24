@@ -19,6 +19,37 @@
 - [x] git init, first commit, push to `Beryndil/ytm-indicator` org repo,
       tag `v0.1.0`.
 
+### v0.2.0 — now-playing popover (2026-04-23)
+
+- [x] `ytm_indicator/popover.py` — GTK4 + libadwaita now-playing panel:
+      album art, title/artist/album stack, scrub bar with cursor times,
+      prev/play-pause/next transport, like/dislike pills, "Open Pear".
+      Accent color sampled from album art (PIL quantize → saturated
+      swatch) and injected as CSS so the progress highlight + play
+      button match the artwork. Anchored top-right via gtk4-layer-shell
+      on the OVERLAY layer so it drops in near any tray location.
+- [x] `sni.py` returns `Menu="/"` and `ContextMenu()` handler spawns the
+      popover subprocess. Old DBusMenu (`menu.py`) removed — any SNI host
+      now routes right-click to us.
+- [x] `cli.py` spawns popover with `LD_PRELOAD=libgtk4-layer-shell.so`
+      (the lib has to interpose before libwayland). Popover also
+      re-execs itself with the preload if launched directly, so
+      `python -m ytm_indicator.popover` works from a shell too.
+- [x] uv venv now needs `--system-site-packages` + system Python (3.14)
+      so the child process can `import gi`. README documents this.
+
+Open items from the popover work:
+
+- Popover doesn't dismiss on focus loss or click-outside. You either hit
+  Escape, the X, or live with it. Proper "click outside to dismiss"
+  needs a transparent fullscreen layer-shell surface underneath catching
+  pointer events. Defer until it's actually annoying.
+- Successive right-clicks stack popovers instead of toggling the
+  existing one. Add a flock-based singleton if it gets annoying.
+- Portal warnings on launch (`org.freedesktop.portal.Settings`,
+  `.portal.Inhibit`) are harmless — Hyprland doesn't run a settings
+  portal. Suppress at logging level if Dave finds them noisy.
+
 ### Post-ship follow-ups (still v0.1.x)
 
 - **2026-04-23 fix** — `cli.Indicator._push_updates` no longer fires
