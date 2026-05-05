@@ -7,7 +7,7 @@ Requires=dbus.socket
 
 [Service]
 Type=simple
-ExecStart=%h/Projects/ytm-indicator/.venv/bin/ytm-indicator
+ExecStart=%h/Projects/active/patina/ytm-indicator/.venv/bin/ytm-indicator
 Restart=on-failure
 RestartSec=5
 # Long-lived; polling loop + a few D-Bus objects.
