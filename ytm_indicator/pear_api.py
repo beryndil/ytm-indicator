@@ -13,7 +13,6 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 CLIENT_ID = "ytm-indicator"
-BASE_URL = "http://127.0.0.1:26538"
 TOKEN_PATH = (
     Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     / "ytm-indicator"
@@ -47,9 +46,10 @@ class PearClient:
         self._load_token()
 
     @classmethod
-    async def create(cls) -> Self:
+    async def create(cls, host: str = "127.0.0.1", port: int = 26538) -> Self:
         timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_S)
-        session = aiohttp.ClientSession(base_url=BASE_URL, timeout=timeout)
+        base_url = f"http://{host}:{port}"
+        session = aiohttp.ClientSession(base_url=base_url, timeout=timeout)
         return cls(session)
 
     async def aclose(self) -> None:

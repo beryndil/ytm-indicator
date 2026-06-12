@@ -209,12 +209,16 @@ class SNIInterface(ServiceInterface):
     @dbus_property(access=PropertyAccess.READ)
     def ToolTip(self) -> "(sa(iiay)ss)":
         s = self._state.current
-        if not s.online:
-            return ["", [], "YouTube Music", "(Pear offline)"]
+        title = s.title or "YouTube Music"
         if not s.has_song:
-            return ["", [], "YouTube Music", "Nothing playing"]
-        desc = s.album or ""
-        return ["", [], f"{s.title} — {s.artist}", desc]
+            title = "YouTube Music"
+        if s.artist and s.album:
+            desc = f"{s.artist} — {s.album}"
+        elif s.artist:
+            desc = s.artist
+        else:
+            desc = ""
+        return ["", [], title, desc]
 
     @dbus_property(access=PropertyAccess.READ)
     def ItemIsMenu(self) -> "b":

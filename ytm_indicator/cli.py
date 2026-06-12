@@ -10,10 +10,11 @@ import subprocess
 import sys
 
 import aiohttp
-from dbus_fast import BusType
+from dbus_fast import BusType, Message, MessageType
 from dbus_fast.aio import MessageBus
 
-from ytm_indicator.art import fetch_art
+from ytm_indicator import config as _config
+from ytm_indicator.art import evict_old_cache, fetch_art
 from ytm_indicator.pear_api import (
     PearClient,
     PearError,
@@ -30,8 +31,12 @@ from ytm_indicator.state import SongState, State
 
 log = logging.getLogger("ytm_indicator")
 
-POLL_INTERVAL_S = 3.0
-OFFLINE_BACKOFF_S = 10.0
+# Config is loaded once at import time so constants are available module-wide.
+# Individual instances can override via the Indicator constructor.
+_cfg = _config.load()
+
+POLL_INTERVAL_S = _cfg.poll_interval_s
+OFFLINE_BACKOFF_S = _cfg.offline_backoff_s
 PEAR_LAUNCH_CMD = ["pear-desktop"]
 # Popover is a separate GTK4 process — keeps GTK's main loop out of our
 # asyncio loop, and a rendering bug there can't take the tray icon down.
@@ -136,9 +141,15 @@ class Indicator:
         self.art_session: aiohttp.ClientSession | None = None
         self.sni: SNIInterface | None = None
         self._bus_name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+        # MPRIS fast-path: set when we have an active listener so _poll_once
+        # can be woken early from the wait.
+        self._mpris_trigger: asyncio.Event = asyncio.Event()
 
     async def start(self) -> None:
-        self.pear = await PearClient.create()
+        self.pear = await PearClient.create(
+            host=_cfg.pear_host,
+            port=_cfg.pear_port,
+        )
         self.art_session = aiohttp.ClientSession()
         self.bus = await MessageBus(bus_type=BusType.SESSION).connect()
 
@@ -162,10 +173,25 @@ class Indicator:
         except Exception as e:
             log.warning("initial watcher registration failed: %s (will retry on owner change)", e)
 
+        await self._setup_mpris_listener()
+
     async def run(self) -> None:
         while True:
             interval = await self._poll_once()
-            await asyncio.sleep(interval)
+            # Wait for the timer OR an early MPRIS wakeup, whichever fires first.
+            try:
+                await asyncio.wait_for(
+                    self._wait_for_mpris_trigger(),
+                    timeout=interval,
+                )
+                log.debug("MPRIS fast-path triggered early poll")
+            except TimeoutError:
+                pass  # normal timer expiry
+
+    async def _wait_for_mpris_trigger(self) -> None:
+        """Wait until the MPRIS listener fires an early-poll signal."""
+        await self._mpris_trigger.wait()
+        self._mpris_trigger.clear()
 
     async def _poll_once(self) -> float:
         """One poll cycle. Returns the interval to wait before the next poll."""
@@ -202,6 +228,25 @@ class Indicator:
         elif not new.has_song:
             self.sni.reset_icon()
         return POLL_INTERVAL_S
+
+    async def _setup_mpris_listener(self) -> None:
+        """Subscribe to MPRIS PropertiesChanged as a supplemental fast-path.
+
+        Tracks Chromium-family bus names via NameOwnerChanged and subscribes
+        to org.freedesktop.DBus.Properties.PropertiesChanged on the
+        org.mpris.MediaPlayer2.Player interface. On relevant changes
+        (PlaybackStatus or Metadata) the MPRIS trigger event is set so the
+        poll loop wakes early and fetches fresh state from Pear.
+
+        Wrapped in try/except — any D-Bus failure downgrades to poll-only
+        mode transparently.
+        """
+        try:
+            assert self.bus
+            await _subscribe_mpris_changes(self.bus, self._mpris_trigger)
+            log.info("MPRIS fast-path listener active")
+        except Exception as e:
+            log.debug("MPRIS listener setup failed, poll-only mode: %s", e)
 
     async def _refresh_art(self, song: SongState) -> None:
         assert self.art_session and self.sni
@@ -240,11 +285,98 @@ class Indicator:
             self.bus.disconnect()
 
 
+_MPRIS_PATH = "/org/mpris/MediaPlayer2"
+_PROPS_IFACE = "org.freedesktop.DBus.Properties"
+_PROPS_CHANGED = "PropertiesChanged"
+_MPRIS_PREFIX = "org.mpris.MediaPlayer2."
+# Chromium-family name fragments — Pear Desktop is Electron-based.
+_CHROMIUM_FRAGS = ("chromium", "chrome", "pear", "electron")
+
+
+async def _subscribe_mpris_changes(bus: MessageBus, trigger: asyncio.Event) -> None:
+    """Wire MPRIS PropertiesChanged to the fast-path trigger.
+
+    Subscribes to org.freedesktop.DBus.Properties.PropertiesChanged on the
+    org.mpris.MediaPlayer2.Player interface. Only signals from known
+    Chromium-family MPRIS players (tracked via NameOwnerChanged) are
+    forwarded to the trigger; if none are known yet, any MPRIS player is
+    accepted so we don't miss early signals from Pear.
+    """
+    introspect = await bus.introspect("org.freedesktop.DBus", "/org/freedesktop/DBus")
+    dbus_proxy = bus.get_proxy_object("org.freedesktop.DBus", "/org/freedesktop/DBus", introspect)
+    dbus_iface = dbus_proxy.get_interface("org.freedesktop.DBus")
+
+    chromium_owners: set[str] = set()
+
+    try:
+        names: list[str] = await dbus_iface.call_list_names()
+        for name in names:
+            if not name.startswith(_MPRIS_PREFIX):
+                continue
+            lower = name[len(_MPRIS_PREFIX) :].lower()
+            if any(frag in lower for frag in _CHROMIUM_FRAGS):
+                try:
+                    owner: str = await dbus_iface.call_get_name_owner(name)
+                    chromium_owners.add(owner)
+                    log.debug("MPRIS: existing player %s owner=%s", name, owner)
+                except Exception:
+                    pass
+    except Exception as e:
+        log.debug("MPRIS: could not enumerate existing names: %s", e)
+
+    def _on_owner_changed(name: str, old_owner: str, new_owner: str) -> None:
+        if not name.startswith(_MPRIS_PREFIX):
+            return
+        lower = name[len(_MPRIS_PREFIX) :].lower()
+        if not any(frag in lower for frag in _CHROMIUM_FRAGS):
+            return
+        if old_owner:
+            chromium_owners.discard(old_owner)
+        if new_owner:
+            chromium_owners.add(new_owner)
+            log.debug("MPRIS: player appeared %s owner=%s", name, new_owner)
+        else:
+            log.debug("MPRIS: player left %s", name)
+
+    dbus_iface.on_name_owner_changed(_on_owner_changed)
+
+    try:
+        await dbus_iface.call_add_match(
+            "type='signal',"
+            "interface='org.freedesktop.DBus.Properties',"
+            "member='PropertiesChanged',"
+            "path='/org/mpris/MediaPlayer2',"
+            "arg0='org.mpris.MediaPlayer2.Player'"
+        )
+    except Exception as e:
+        log.debug("MPRIS: AddMatch failed (may still work on session bus): %s", e)
+
+    def _on_message(msg: Message) -> None:
+        if msg.message_type != MessageType.SIGNAL:
+            return
+        if msg.interface != _PROPS_IFACE or msg.member != _PROPS_CHANGED:
+            return
+        if msg.path != _MPRIS_PATH:
+            return
+        if chromium_owners and msg.sender not in chromium_owners:
+            return
+        try:
+            changed: dict = msg.body[1] if len(msg.body) > 1 else {}
+            if "PlaybackStatus" in changed or "Metadata" in changed:
+                log.debug("MPRIS fast-path: %s changed", list(changed.keys()))
+                trigger.set()
+        except Exception as e:
+            log.debug("MPRIS: bad PropertiesChanged body: %s", e)
+
+    bus.add_message_handler(_on_message)
+
+
 async def _run() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    evict_old_cache()
     ind = Indicator()
     stop = asyncio.Event()
 
