@@ -23,6 +23,7 @@ Hyprland window rule. Escape or the close button dismisses.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -51,11 +52,15 @@ TOKEN_PATH = (
     / "token.json"
 )
 ART_CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "ytm-indicator"
+LOCK_PATH = ART_CACHE / "popover.lock"
 POLL_S = 1.5
 REQUEST_TIMEOUT_S = 3.0
 
 # Fallback accent (libadwaita default blue) if album art sampling fails.
 DEFAULT_ACCENT = "#3584e4"
+
+# Module-level fd kept open to maintain the flock; released on process exit.
+_lock_fd: Any = None
 
 # gtk4-layer-shell works by interposing itself between GTK and libwayland
 # at dynamic-link time. Python imports don't satisfy the "before libwayland"
@@ -66,6 +71,7 @@ _LAYER_SHELL_MARKER = "_YTM_LAYER_SHELL_PRELOADED"
 
 
 # ─── Pear client (sync, stdlib only) ────────────────────────────────────
+
 
 def _load_token() -> str | None:
     try:
@@ -94,6 +100,7 @@ def _request(method: str, path: str, token: str | None) -> Any:
 
 # ─── Accent extraction ──────────────────────────────────────────────────
 
+
 def _extract_accent(png_path: Path) -> str | None:
     """Pick the most saturated swatch from album art; None if we can't read it."""
     try:
@@ -119,6 +126,7 @@ def _extract_accent(png_path: Path) -> str | None:
 
 
 # ─── Time formatting ────────────────────────────────────────────────────
+
 
 def _fmt_time(seconds: float) -> str:
     s = max(0, int(seconds))
@@ -190,7 +198,27 @@ window.ytm-popover {
 """
 
 
+# ─── Portal warning suppression ─────────────────────────────────────────
+
+
+class _PortalWarningFilter(logging.Filter):
+    """Suppress harmless portal probe warnings on non-GNOME desktops."""
+
+    _SUPPRESSED = (
+        "org.freedesktop.portal.Settings",
+        "org.freedesktop.portal.Inhibit",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.WARNING:
+            msg = record.getMessage()
+            if any(s in msg for s in self._SUPPRESSED):
+                return False
+        return True
+
+
 # ─── The popover window ─────────────────────────────────────────────────
+
 
 class Popover(Gtk.Window):
     # Subclassing plain Gtk.Window (not Adw.ApplicationWindow) because
@@ -463,9 +491,7 @@ class Popover(Gtk.Window):
             log.warning("pear-desktop spawn failed: %s", e)
 
     def _fire(self, method: str, path: str) -> None:
-        threading.Thread(
-            target=_request, args=(method, path, self._token), daemon=True
-        ).start()
+        threading.Thread(target=_request, args=(method, path, self._token), daemon=True).start()
         # Refresh quickly so the UI reflects the action even before the poll
         # tick catches up.
         GLib.timeout_add(200, self._refresh_now)
@@ -533,6 +559,7 @@ def _art_path_for(state: dict[str, Any]) -> Path | None:
 
 # ─── Entry point ────────────────────────────────────────────────────────
 
+
 def _parse_args(argv: list[str]) -> dict[str, Any]:
     ap = argparse.ArgumentParser(description="ytm-indicator now-playing popover")
     ap.add_argument("--title", default="")
@@ -575,12 +602,46 @@ def _ensure_layer_shell_preloaded() -> None:
     os.execvpe(sys.executable, [sys.executable, "-m", "ytm_indicator.popover", *sys.argv[1:]], env)
 
 
+def _acquire_singleton_lock() -> None:
+    """Acquire exclusive flock on LOCK_PATH; exit 0 if another popover is running."""
+    global _lock_fd
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(LOCK_PATH, "w")  # noqa: SIM115
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fd.close()
+        sys.exit(0)
+    _lock_fd = fd  # keep open — flock releases when fd is closed/process exits
+
+
+def _build_scrim(application: Adw.Application) -> Gtk.Window:
+    """Create a transparent fullscreen OVERLAY surface that catches off-popover clicks."""
+    scrim = Gtk.Window()
+    application.add_window(scrim)
+    scrim.set_decorated(False)
+    scrim.set_opacity(0.0)
+    scrim.set_child(Gtk.Box())
+    LayerShell.init_for_window(scrim)
+    LayerShell.set_layer(scrim, LayerShell.Layer.OVERLAY)
+    LayerShell.set_anchor(scrim, LayerShell.Edge.TOP, True)
+    LayerShell.set_anchor(scrim, LayerShell.Edge.BOTTOM, True)
+    LayerShell.set_anchor(scrim, LayerShell.Edge.LEFT, True)
+    LayerShell.set_anchor(scrim, LayerShell.Edge.RIGHT, True)
+    LayerShell.set_exclusive_zone(scrim, -1)
+    LayerShell.set_keyboard_mode(scrim, LayerShell.KeyboardMode.NONE)
+    return scrim
+
+
 def main() -> None:
     logging.basicConfig(level=logging.WARNING)
+    logging.getLogger().addFilter(_PortalWarningFilter())
     _ensure_layer_shell_preloaded()
+    _acquire_singleton_lock()
     initial = _parse_args(sys.argv[1:])
     token = _load_token()
 
+    GLib.setenv("GTK_USE_PORTAL", "0", True)
     Adw.init()
     app = Adw.Application(
         application_id="org.beryndil.YtmIndicator.Popover",
@@ -594,7 +655,13 @@ def main() -> None:
         Gtk.StyleContext.add_provider_for_display(
             display, base_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
+        scrim = _build_scrim(application)
         win = Popover(application, initial, token)
+        click = Gtk.GestureClick()
+        click.connect("pressed", lambda *_: (scrim.close(), win.close()))
+        scrim.add_controller(click)
+        win.connect("destroy", lambda *_: scrim.close())
+        scrim.present()
         win.present()
 
     app.connect("activate", on_activate)

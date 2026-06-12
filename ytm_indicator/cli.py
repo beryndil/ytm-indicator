@@ -73,20 +73,26 @@ def _spawn_popover(song: SongState) -> None:
     """
     argv = [
         *POPOVER_CMD,
-        "--title", song.title,
-        "--artist", song.artist,
-        "--album", song.album or "",
-        "--video-id", song.video_id,
-        "--paused", "true" if song.is_paused else "false",
-        "--elapsed", f"{song.elapsed_s:.0f}",
-        "--duration", f"{song.duration_s:.0f}",
-        "--like", song.like,
+        "--title",
+        song.title,
+        "--artist",
+        song.artist,
+        "--album",
+        song.album or "",
+        "--video-id",
+        song.video_id,
+        "--paused",
+        "true" if song.is_paused else "false",
+        "--elapsed",
+        f"{song.elapsed_s:.0f}",
+        "--duration",
+        f"{song.duration_s:.0f}",
+        "--like",
+        song.like,
     ]
     env = os.environ.copy()
     existing = env.get("LD_PRELOAD", "")
-    env["LD_PRELOAD"] = (
-        f"{LAYER_SHELL_LIB}:{existing}" if existing else LAYER_SHELL_LIB
-    )
+    env["LD_PRELOAD"] = f"{LAYER_SHELL_LIB}:{existing}" if existing else LAYER_SHELL_LIB
     env["_YTM_LAYER_SHELL_PRELOADED"] = "1"
     try:
         subprocess.Popen(
